@@ -25,9 +25,19 @@
 // `digit` is '0'-'9'.
 typedef void (*rotary_dial_digit_cb_t)(char digit);
 
+// Called with `true` the moment a finger hole is grabbed, and `false` once
+// the disc has released (either sprung back to rest, or the touch was lost
+// without ever grabbing a hole). If this screen lives inside an
+// lv_tileview, wire this to pause tileview swiping while `true`, so
+// dialing a digit can't also be read as a swipe to the next screen.
+typedef void (*rotary_dial_drag_cb_t)(bool dragging);
+
 // Builds the fixed faceplate + rotating finger-hole disc as a child of
 // `parent`, sized to fill an 800x800 round display. Returns the root object.
 lv_obj_t *rotary_dial_create(lv_obj_t *parent);
 
 // Registers the digit-dialed callback. Pass NULL to clear it.
 void rotary_dial_set_callback(rotary_dial_digit_cb_t cb);
+
+// Registers the drag-state callback. Pass NULL to clear it.
+void rotary_dial_set_drag_callback(rotary_dial_drag_cb_t cb);

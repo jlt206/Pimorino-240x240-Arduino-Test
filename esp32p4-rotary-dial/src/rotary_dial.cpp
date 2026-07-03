@@ -51,6 +51,7 @@ static float s_touch_start_deg = 0;
 static float s_rotation_start  = 0;
 
 static rotary_dial_digit_cb_t s_cb = NULL;
+static rotary_dial_drag_cb_t  s_drag_cb = NULL;
 
 // ---- Small helpers -----------------------------------------------------
 
@@ -163,6 +164,7 @@ static void spring_back_ready_cb(lv_anim_t *a) {
         s_cb(digit);
     }
     s_grabbed_digit = -1;
+    if (s_drag_cb) s_drag_cb(false);
 }
 
 static void start_spring_back(void) {
@@ -215,6 +217,7 @@ static void dial_event_cb(lv_event_t *e) {
         s_grabbed_digit    = SLOT_DIGIT[best_slot];
         s_touch_start_deg  = touch_deg;
         s_rotation_start   = s_rotation_deg;
+        if (s_drag_cb) s_drag_cb(true);
     } else if (code == LV_EVENT_PRESSING) {
         if (s_grabbed_digit < 0) return;
         float delta = angle_diff(touch_deg, s_touch_start_deg);
@@ -312,4 +315,8 @@ lv_obj_t *rotary_dial_create(lv_obj_t *parent) {
 
 void rotary_dial_set_callback(rotary_dial_digit_cb_t cb) {
     s_cb = cb;
+}
+
+void rotary_dial_set_drag_callback(rotary_dial_drag_cb_t cb) {
+    s_drag_cb = cb;
 }
