@@ -22,7 +22,9 @@
 #include "bt_audio.h"
 #include "contacts_screen.h"
 #include "rotary_dial.h"
+#include "secrets.h"
 #include "weather_screen.h"
+#include "web_weather.h"
 
 static const uint16_t SCREEN_W = 800;
 static const uint16_t SCREEN_H = 800;
@@ -176,6 +178,15 @@ static void weather_timer_cb(lv_timer_t *t) {
     weather_screen_update();
 }
 
+// Open-Meteo is a free lookup, but there's no need to hammer it - refetch
+// every 10 minutes.
+static const uint32_t WEB_WEATHER_REFRESH_MS = 10UL * 60UL * 1000UL;
+
+static void web_weather_timer_cb(lv_timer_t *t) {
+    WebWeatherData data = web_weather_fetch();
+    weather_screen_set_web_weather(data);
+}
+
 void setup() {
     Serial.begin(115200);
 
@@ -222,6 +233,17 @@ void setup() {
     lv_timer_create(auto_dial_poll_cb, 200, NULL);
     lv_timer_create(status_timer_cb, 1000, NULL);
     lv_timer_create(weather_timer_cb, 3000, NULL);
+
+    // Connects (blocking, up to ~15s) using the credentials in secrets.h -
+    // copy include/secrets.h.example to include/secrets.h and fill in your
+    // real Wi-Fi network before flashing.
+    if (web_weather_connect_wifi(WIFI_SSID, WIFI_PASSWORD)) {
+        Serial.println("Wi-Fi connected");
+        web_weather_timer_cb(nullptr); // first fetch right away
+    } else {
+        Serial.println("Wi-Fi connect failed - local weather panel will show 'unavailable'");
+    }
+    lv_timer_create(web_weather_timer_cb, WEB_WEATHER_REFRESH_MS, NULL);
 }
 
 void loop() {
