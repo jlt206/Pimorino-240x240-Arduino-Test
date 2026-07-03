@@ -1,11 +1,6 @@
 #include "rotary_dial.h"
 
 #include <math.h>
-#include <stdlib.h>
-
-#if defined(ESP32)
-#include "esp_heap_caps.h"
-#endif
 
 // ---- Layout constants (all in px, for an 800x800 canvas) -----------------
 static const lv_coord_t DIAL_SIZE     = 800;
@@ -40,19 +35,18 @@ static const char *DIGIT_LETTERS[10] = {
     "WXY", // 9
 };
 
-static const lv_color_t COLOR_BEZEL  = LV_COLOR_MAKE(0xED, 0xE0, 0xC4); // cream
-static const lv_color_t COLOR_DISC   = LV_COLOR_MAKE(0xF8, 0xF6, 0xF1); // off-white
-static const lv_color_t COLOR_TEXT   = LV_COLOR_MAKE(0x20, 0x1C, 0x14);
-static const lv_color_t COLOR_CHROME = LV_COLOR_MAKE(0xC9, 0xCE, 0xD3);
-static const lv_color_t COLOR_HUB    = LV_COLOR_MAKE(0x2B, 0x2E, 0x33);
-static const lv_color_t COLOR_HUB_TX = LV_COLOR_MAKE(0xE8, 0xE8, 0xE8);
+static lv_color_t COLOR_BEZEL(void)  { return lv_color_hex(0xEDE0C4); } // cream
+static lv_color_t COLOR_DISC(void)   { return lv_color_hex(0xF8F6F1); } // off-white
+static lv_color_t COLOR_TEXT(void)   { return lv_color_hex(0x201C14); }
+static lv_color_t COLOR_CHROME(void) { return lv_color_hex(0xC9CED3); }
+static lv_color_t COLOR_HUB(void)    { return lv_color_hex(0x2B2E33); }
+static lv_color_t COLOR_HUB_TX(void) { return lv_color_hex(0xE8E8E8); }
 
 // ---- State -----------------------------------------------------------
-static lv_obj_t *s_disc_canvas = NULL;
-static lv_color_t *s_disc_buf  = NULL;
+static lv_obj_t *s_disc = NULL; // the rotating object (holes are its children)
 
-static float s_rotation_deg   = 0;   // current clockwise rotation of the disc
-static int   s_grabbed_digit  = -1;  // digit held during a drag, -1 = none
+static float s_rotation_deg    = 0;   // current clockwise rotation of the disc
+static int   s_grabbed_digit   = -1;  // digit held during a drag, -1 = none
 static float s_touch_start_deg = 0;
 static float s_rotation_start  = 0;
 
@@ -111,47 +105,54 @@ static void place_label_centered(lv_obj_t *label, lv_coord_t cx, lv_coord_t cy) 
 
 static void set_disc_rotation(float deg) {
     s_rotation_deg = deg;
-    lv_obj_set_style_transform_angle(s_disc_canvas, (int16_t)lroundf(deg * 10.0f), 0);
+    // v8 equivalent: lv_obj_set_style_transform_angle(). v9 renamed the
+    // style property to "rotation" (still in 0.1-degree units).
+    lv_obj_set_style_transform_rotation(s_disc, (int16_t)lroundf(deg * 10.0f), 0);
 }
 
-// ---- Drawing the rotating disc (holes + finger-stop cutout look) --------
-static void draw_disc(void) {
-    lv_draw_rect_dsc_t disc_dsc;
-    lv_draw_rect_dsc_init(&disc_dsc);
-    disc_dsc.radius   = LV_RADIUS_CIRCLE;
-    disc_dsc.bg_color = COLOR_DISC;
-    disc_dsc.bg_opa   = LV_OPA_COVER;
-    disc_dsc.border_width = 3;
-    disc_dsc.border_color = lv_color_darken(COLOR_DISC, 40);
-    disc_dsc.border_opa   = LV_OPA_COVER;
+static lv_obj_t *make_flat_circle(lv_obj_t *parent, lv_coord_t diam, lv_color_t bg,
+                                   lv_color_t border, lv_coord_t border_w) {
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_set_size(o, diam, diam);
+    lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(o, bg, 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(o, border_w, 0);
+    lv_obj_set_style_border_color(o, border, 0);
+    lv_obj_set_style_border_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_shadow_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    return o;
+}
 
-    lv_canvas_fill_bg(s_disc_canvas, COLOR_BEZEL, LV_OPA_COVER);
-    lv_canvas_draw_rect(s_disc_canvas, 0, 0, DISC_DIAM, DISC_DIAM, &disc_dsc);
-
-    lv_draw_rect_dsc_t hole_dsc;
-    lv_draw_rect_dsc_init(&hole_dsc);
-    hole_dsc.radius   = LV_RADIUS_CIRCLE;
-    hole_dsc.bg_color = COLOR_BEZEL;
-    hole_dsc.bg_opa   = LV_OPA_COVER;
-    hole_dsc.border_width = 2;
-    hole_dsc.border_color = lv_color_darken(COLOR_BEZEL, 30);
-    hole_dsc.border_opa   = LV_OPA_COVER;
+// ---- The rotating disc: a plain widget whose children (the holes) rotate
+// with it, via the generic per-object transform style properties. --------
+static void create_disc(lv_obj_t *root) {
+    s_disc = make_flat_circle(root, DISC_DIAM, COLOR_DISC(), lv_color_darken(COLOR_DISC(), 40), 3);
+    lv_obj_set_pos(s_disc, CENTER - DISC_RADIUS, CENTER - DISC_RADIUS);
+    lv_obj_set_style_transform_pivot_x(s_disc, DISC_RADIUS, 0);
+    lv_obj_set_style_transform_pivot_y(s_disc, DISC_RADIUS, 0);
 
     for (int k = 0; k < NUM_SLOTS; k++) {
         if (SLOT_DIGIT[k] < 0) continue; // finger-stop gap: no hole
         float angle = k * SLOT_ANGLE;
-        lv_coord_t hx, hy;
+        lv_coord_t hx, hy; // screen-space position at rest
         polar_to_xy(angle, HOLE_RING_R, &hx, &hy);
-        // hx/hy are canvas-local since disc canvas is centered on CENTER,CENTER
-        // and its own local origin is also its center.
+
+        lv_obj_t *hole = make_flat_circle(s_disc, HOLE_RADIUS * 2, COLOR_BEZEL(),
+                                           lv_color_darken(COLOR_BEZEL(), 30), 2);
+        // Position relative to the disc's own local box (disc-local origin
+        // is its top-left corner; disc-local center is DISC_RADIUS,DISC_RADIUS).
         lv_coord_t lx = DISC_RADIUS + (hx - CENTER) - HOLE_RADIUS;
         lv_coord_t ly = DISC_RADIUS + (hy - CENTER) - HOLE_RADIUS;
-        lv_canvas_draw_rect(s_disc_canvas, lx, ly, HOLE_RADIUS * 2, HOLE_RADIUS * 2, &hole_dsc);
+        lv_obj_set_pos(hole, lx, ly);
     }
 }
 
 // ---- Touch handling ------------------------------------------------------
 static void spring_back_anim_cb(void *var, int32_t v) {
+    (void)var;
     set_disc_rotation((float)v / 10.0f);
 }
 
@@ -227,7 +228,7 @@ static void dial_event_cb(lv_event_t *e) {
     }
 }
 
-// ---- Fixed faceplate: bezel + number/letter ring + finger stop + hub ----
+// ---- Fixed faceplate: number/letter ring + finger stop + hub -------------
 static void create_faceplate(lv_obj_t *root) {
     for (int k = 0; k < NUM_SLOTS; k++) {
         int digit = SLOT_DIGIT[k];
@@ -236,7 +237,7 @@ static void create_faceplate(lv_obj_t *root) {
 
         lv_obj_t *num = lv_label_create(root);
         lv_obj_set_style_text_font(num, &lv_font_montserrat_28, 0);
-        lv_obj_set_style_text_color(num, COLOR_TEXT, 0);
+        lv_obj_set_style_text_color(num, COLOR_TEXT(), 0);
         lv_label_set_text_fmt(num, "%d", digit);
         lv_coord_t nx, ny;
         polar_to_xy(angle, NUMBER_RADIUS, &nx, &ny);
@@ -245,7 +246,7 @@ static void create_faceplate(lv_obj_t *root) {
         if (DIGIT_LETTERS[digit][0] != '\0') {
             lv_obj_t *letters = lv_label_create(root);
             lv_obj_set_style_text_font(letters, &lv_font_montserrat_16, 0);
-            lv_obj_set_style_text_color(letters, COLOR_TEXT, 0);
+            lv_obj_set_style_text_color(letters, COLOR_TEXT(), 0);
             lv_label_set_text(letters, DIGIT_LETTERS[digit]);
             lv_coord_t lx, ly;
             polar_to_xy(angle, LETTER_RADIUS, &lx, &ly);
@@ -253,35 +254,31 @@ static void create_faceplate(lv_obj_t *root) {
         }
     }
 
-    // Fixed chrome finger stop, sitting at the gap slot.
+    // Fixed chrome finger stop, sitting at the gap slot, drawn after (i.e.
+    // in front of) the disc.
     int k_stop = stop_slot();
     lv_obj_t *stop = lv_obj_create(root);
     lv_obj_clear_flag(stop, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(stop, 34, 70);
     lv_obj_set_style_radius(stop, 8, 0);
-    lv_obj_set_style_bg_color(stop, COLOR_CHROME, 0);
+    lv_obj_set_style_bg_color(stop, COLOR_CHROME(), 0);
     lv_obj_set_style_border_width(stop, 2, 0);
-    lv_obj_set_style_border_color(stop, lv_color_darken(COLOR_CHROME, 40), 0);
+    lv_obj_set_style_border_color(stop, lv_color_darken(COLOR_CHROME(), 40), 0);
+    lv_obj_set_style_shadow_width(stop, 0, 0);
     lv_obj_set_style_transform_pivot_x(stop, 17, 0);
     lv_obj_set_style_transform_pivot_y(stop, 35, 0);
-    lv_obj_set_style_transform_angle(stop, (int16_t)lroundf(k_stop * SLOT_ANGLE * 10.0f), 0);
+    lv_obj_set_style_transform_rotation(stop, (int16_t)lroundf(k_stop * SLOT_ANGLE * 10.0f), 0);
     lv_coord_t sx, sy;
     polar_to_xy(k_stop * SLOT_ANGLE, STOP_RADIUS, &sx, &sy);
     lv_obj_set_pos(stop, sx - 17, sy - 35);
 
     // Fixed center hub, drawn last so it sits above the rotating disc.
-    lv_obj_t *hub = lv_obj_create(root);
-    lv_obj_clear_flag(hub, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(hub, HUB_RADIUS * 2, HUB_RADIUS * 2);
-    lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(hub, COLOR_HUB, 0);
-    lv_obj_set_style_border_width(hub, 3, 0);
-    lv_obj_set_style_border_color(hub, lv_color_darken(COLOR_CHROME, 10), 0);
+    lv_obj_t *hub = make_flat_circle(root, HUB_RADIUS * 2, COLOR_HUB(), lv_color_darken(COLOR_CHROME(), 10), 3);
     lv_obj_set_pos(hub, CENTER - HUB_RADIUS, CENTER - HUB_RADIUS);
 
     lv_obj_t *hub_label = lv_label_create(hub);
     lv_obj_set_style_text_font(hub_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(hub_label, COLOR_HUB_TX, 0);
+    lv_obj_set_style_text_color(hub_label, COLOR_HUB_TX(), 0);
     lv_obj_set_style_text_align(hub_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(hub_label, "DIAL\n999");
     lv_obj_center(hub_label);
@@ -292,34 +289,23 @@ lv_obj_t *rotary_dial_create(lv_obj_t *parent) {
     lv_obj_t *root = lv_obj_create(parent);
     lv_obj_set_size(root, DIAL_SIZE, DIAL_SIZE);
     lv_obj_set_style_radius(root, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(root, COLOR_BEZEL, 0);
+    lv_obj_set_style_bg_color(root, COLOR_BEZEL(), 0);
     lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_shadow_width(root, 0, 0);
     lv_obj_set_style_pad_all(root, 0, 0);
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_center(root);
 
-    // Rotating disc, drawn on a canvas so it can be spun as one image. Created
-    // before the faceplate's finger-stop/hub so those stack visually on top;
-    // the number/letter labels sit further out and never overlap the disc.
-    size_t buf_size = LV_CANVAS_BUF_SIZE_TRUE_COLOR(DISC_DIAM, DISC_DIAM);
-#if defined(ESP32)
-    s_disc_buf = (lv_color_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#else
-    s_disc_buf = (lv_color_t *)malloc(buf_size);
-#endif
-
-    s_disc_canvas = lv_canvas_create(root);
-    lv_canvas_set_buffer(s_disc_canvas, s_disc_buf, DISC_DIAM, DISC_DIAM, LV_IMG_CF_TRUE_COLOR);
-    lv_obj_set_pos(s_disc_canvas, CENTER - DISC_RADIUS, CENTER - DISC_RADIUS);
-    lv_obj_set_style_transform_pivot_x(s_disc_canvas, DISC_RADIUS, 0);
-    lv_obj_set_style_transform_pivot_y(s_disc_canvas, DISC_RADIUS, 0);
-    lv_obj_add_flag(s_disc_canvas, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_disc_canvas, dial_event_cb, LV_EVENT_ALL, NULL);
-
-    draw_disc();
+    // Disc created before the faceplate's finger-stop/hub so those stack
+    // visually on top; the number/letter labels sit further out and never
+    // overlap the disc.
+    create_disc(root);
     set_disc_rotation(0);
-
     create_faceplate(root);
+
+    // All touch handling happens on `root`; the disc, holes, stop and hub
+    // are all non-clickable so hits fall through to it uniformly.
+    lv_obj_add_event_cb(root, dial_event_cb, LV_EVENT_ALL, NULL);
 
     return root;
 }
